@@ -12,6 +12,7 @@ eggs/
 .eggs/
 lib/
 lib64/
+!desktop/src/lib/
 parts/
 sdist/
 var/
@@ -41,6 +42,9 @@ htmlcov/
 # Environment
 .env
 .env.local
+
+# Machine-specific OMP MCP launch paths
+.omp/mcp.json
 
 # macOS
 .DS_Store

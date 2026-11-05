@@ -24,6 +24,7 @@ Thanks to Charlie Hall for allowing me to use and adapt the knowledge files and 
 - [Safety Guardrails](#safety-guardrails)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
+- [Gaggimate Studio Desktop](#gaggimate-studio-desktop)
 - [Claude Desktop Project Setup (Optional)](#claude-desktop-project-setup-optional)
 - [Configuration (Optional)](#configuration-optional)
 - [Troubleshooting](#troubleshooting)
@@ -37,7 +38,7 @@ Thanks to Charlie Hall for allowing me to use and adapt the knowledge files and 
 
 ## What's in this Repository
 
-**MCP Server** — Nine tools and eight resources that give your AI direct access to your machine and local data:
+**MCP Server** — Eleven tools and eight resources/templates that give your AI direct access to your machine and local data:
 - **Read shot data** — Temperature curves, pressure readings, flow rates, extraction timing
 - **Manage profiles** — Create, update, and list brewing profiles directly on your device
 - **Track feedback** — Record ratings and tasting notes synced to your Gaggimate
@@ -71,6 +72,17 @@ Thanks to Charlie Hall for allowing me to use and adapt the knowledge files and 
 See [Example: Using ChatGPT to manually create profiles for Gaggimate by Dule Rabbit](https://youtu.be/kjhwed1PZvg) — this MCP server automates that entire workflow.
 
 ## Changelog
+
+### 2026-10-25
+- **Local brewing workspace**: Added persistent multi-machine history, search/date/bean/profile filters, comparison overlays, recorded targets and phase stops, aggregate/per-profile/per-phase statistics, and manual brews with reusable brewers and recipes. Imports are on demand; cached history works offline.
+- **Coffee and grinder library**: Added structured coffee metadata, grinders, archive/restore, history-preserving duplicate merges, and native versioned JSON import/export with a required preview. This is not a Beanconqueror/ZIP/Excel importer.
+- **Quick notes**: Added dose/yield, rating, taste, grinder associations, and explicit history-based setting suggestions. Desktop saves are local by default; optional device writes retain visible failure/retry state.
+- **Profile browser and API**: Added machine-specific browsing, selection, JSON export, and validated Pro-profile import as a new unselected copy. `manage_profile(action="import", profile_data={...})` preserves firmware extensions and adaptive pump settings. `list_recent_shots` now accepts `offset` for history pagination.
+- **Telemetry contract**: Dense samples now include recorded pressure/flow/temperature targets, and phases include recorded target start/end/mean values. Missing dense measurements and phase averages/flow totals are `null`, not invented zeros; consumers must accept these nullable fields.
+- **Gaggimate Studio**: Added a Tauri desktop app with React, shadcn/ui, AI Elements, real shot curves, bean tracking, and a PydanticAI barista backed by ChatGPT subscription sign-in. Agent events stream over AG-UI; generated charts, diagrams, forms, and tables use an app-owned A2UI v1.0 candidate catalog.
+- **Bean recorder**: Added `manage_beans` for coffee catalog management and per-shot bean/grind snapshots. Saves automatically sync `beanType` and `grindSetting` to Gaggimate and verify them by read-back; failed sync remains visible and retryable.
+- **Metadata preservation**: Shot-note updates now merge existing device fields before saving, verify writes, and preserve complete metadata in atomic local backups. `manage_shot_notes` now accepts `bean_type`.
+- **OMP setup**: Added project-local MCP configuration instructions, including the source import path required by this checkout.
 
 ### 2026-10-18
 - **Fixed: `.slog` parser silently corrupted shots recorded by firmware v1.9.0+**. GaggiMate firmware v1.9.0 bumped the shot log format from v5 to v7 (first sample field widened from a 2-byte tick to a 4-byte elapsed-millisecond counter; a `wp` field added), growing each sample record from 26 to 30 bytes. The parser hardcoded the old 26-byte stride and never read the file's own declared record size, so every v6+ shot decoded misaligned — producing temperatures in the thousands of °C, matching bogus pressures, scale readings over a kilogram, negative flow, and phase timestamps in the thousands of seconds, all with no warning. The parser now trusts the on-disk record/header size, supports shot log versions 1–8, and degrades gracefully (decodes known fields, skips unknown ones, emits a `warnings` entry in `analyze_shot` output) on any future version instead of failing silently.
@@ -217,19 +229,22 @@ flowchart LR
 
 ## MCP Tools
 
-This server provides eight tools and six resources that give AI agents the capabilities they need to help with your espresso workflow:
+This server provides eleven tools and eight resources/templates that give AI agents the capabilities they need to help with your espresso workflow:
 
 ### Device Tools
 
 #### `manage_profile`
 Create, view, update, delete, and list brewing profiles on your Gaggimate device. Profiles define the entire extraction process—water temperature, pre-infusion settings, pressure curves, and flow targets. The AI can build profiles optimized for specific beans or brewing styles. **Partial updates** are supported—you can change just temperature, phases, or name without respecifying everything. Profiles created by AI are automatically tagged with `[AI]` in their name so you can identify them.
 
+Use `action="import", profile_data={...}` for a complete GaggiMate **Pro** profile object. Unlike the simplified create operation, import preserves descriptions, dose, phase extensions and adaptive firmware values. It validates the object, forces a new ID and `selected=False`, and adds the configured AI suffix. It never overwrites or selects an existing profile.
+
 #### `analyze_shot`
-Retrieve and analyze any shot with a **3-level detail system** that balances insight vs. token cost:
+Retrieve and analyze any shot with four detail levels that balance insight vs. token cost:
 
 - **`summary`** (default): Key indicators for quick triage — puck resistance, channeling risk, temperature stability, profile compliance, and human-readable annotation labels. Start here.
-- **`per_phase`**: Full diagnostics plus per-phase breakdowns (preinfusion ramp rate, brew stability, decline taper smoothness) with representative samples. Use when diagnosing which phase has a problem.
-- **`detailed`**: Everything in `per_phase` plus all time-series samples. Use for deep analysis when exact timings matter.
+- **`per_phase`**: Full diagnostics and per-phase breakdowns without samples.
+- **`per_phase_detailed`**: Per-phase diagnostics with approximately five representative samples per phase.
+- **`time_series`**: Per-phase diagnostics plus binned mean telemetry at a requested `resolution_hz` of 1–4 Hz, capped at 150 points. Recorded target curves and phase target start/end/mean values come from the original log, not today's profile. Unrecorded dense measurements and phase averages/flow totals are `null`; target fields are omitted when absent.
 
 Raw binary shot logs are parsed and transformed into an AI-friendly format with physics-informed diagnostics: puck resistance modeling (P/F²), channeling risk scoring, temperature deviation tracking, pressure/flow stability analysis, and profile compliance metrics. Every numeric metric is accompanied by a band annotation (e.g., `MODERATE`, `STABLE`, `SLIGHT_OVERSHOOT`) so the AI can interpret values without needing to know the thresholds.
 
@@ -237,12 +252,17 @@ Raw binary shot logs are parsed and transformed into an AI-friendly format with 
 Record ratings (0-5 stars), tasting notes, and brewing parameters for any shot. Notes are synced directly to your Gaggimate device via WebSocket and also stored locally as backup. You can track taste balance (bitter/balanced/sour), grind settings, and dose weights. Notes added by AI are prefixed with `[AI]:` for transparency.
 
 #### `list_recent_shots`
-Browse your shot history with optional filtering. Returns a list of recent shots with their IDs, timestamps, profile names, and any ratings you've recorded. This helps the AI understand your brewing patterns and find shots to analyze or compare.
+Browse device history with `limit` (1–50) and `offset` (zero-based, default 0). Returns shot IDs, timestamps, profile names, available summary measurements, and locally backed-up ratings. Advance the offset by the returned count until a short page; desktop search and filtering operate on the imported local journal.
 
 #### `diagnose_connection`
 Troubleshoot connectivity issues between the MCP server and your Gaggimate device. Runs automated tests for network reachability, HTTP port access, API availability, and common misconfigurations. Returns specific recommendations if problems are detected.
 
 ### Local Data Tools
+
+#### `manage_beans`
+Manage a structured bean library and associate beans with individual shots. Actions: `list`, `save`, `delete`, `record`, `records`, and `sync`. `record` requires `bean_id`, `shot_id`, and `grind_setting`; it captures the bean details at recording time, persists locally, and automatically syncs the bean name and grind to the device. Editing or deleting a library entry does not rewrite historical snapshots. Re-recording a shot explicitly corrects its association.
+
+Inspect `record.sync_status`, not just `success`: `success: true` means the local record is durable; only `sync_status: "synced"` means the device confirmed the merged metadata by read-back. Retry a failed/pending record with `action: "sync"` and its `shot_id`. Bean data lives in `data/beans.sqlite3`; it is separate from the narrative `manage_coffee` brewing journals.
 
 #### `manage_coffee`
 Create and manage coffee tracking files. Each coffee gets a markdown file with bean profile, brewing approach (narrative), and a brewing journal with dated analysis entries. The agent records what worked, what didn't, and what to try next — not raw numbers. Supports creating new coffees, logging journal entries, updating content, deleting files, and listing all tracked coffees.
@@ -287,7 +307,7 @@ These limits are enforced at the configuration level and cannot be overridden th
 
 - A [Gaggimate](https://github.com/jniebuhr/gaggimate)-modded espresso machine (Gaggia Classic, etc.)
 - An MCP host application (e.g., [Claude Desktop](https://claude.ai/download), [VS Code with GitHub Copilot](https://code.visualstudio.com/), or any other MCP-compatible client)
-- Python 3.11+ with [uv](https://docs.astral.sh/uv/) package manager
+- Python 3.13+ with [uv](https://docs.astral.sh/uv/) package manager
 - Same network access as your Gaggimate device
 
 ## Quick Start
@@ -350,6 +370,43 @@ Add this configuration (replace paths with your actual values):
 }
 ```
 
+#### OMP
+
+Run `uv sync --locked`, then create `.omp/mcp.json` in this repository. Replace the paths below with your actual `uv` executable and checkout paths:
+
+```json
+{
+  "mcpServers": {
+    "gaggimate": {
+      "type": "stdio",
+      "command": "/opt/homebrew/bin/uv",
+      "args": [
+        "--directory",
+        "/absolute/path/to/gaggimate-mcp",
+        "run",
+        "--frozen",
+        "mcp",
+        "run",
+        "src/gaggimate_mcp/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/absolute/path/to/gaggimate-mcp/src"
+      }
+    }
+  }
+}
+```
+
+`PYTHONPATH` is required because this project's `src/` package is not installed by `uv sync`. `--directory` keeps knowledge, user data, and `.env` resolution anchored to this checkout. The local MCP configuration is ignored by Git because it contains machine-specific paths.
+
+Start OMP from this repository, or run `/mcp reload` in an existing session. Use `/mcp list` and `/mcp test gaggimate` to inspect the connection. A read-only integration check from the repository root is:
+
+```bash
+omp read gaggimate://knowledge
+```
+
+The default device address is `gaggimate.local`. No profile changes or brewing commands are needed to verify setup.
+
 #### Other MCP Hosts (not tested)
 
 For other MCP hosts, configure the server using the stdio transport with the command:
@@ -367,6 +424,74 @@ Make sure you're on the same network as your Gaggimate device, then try:
 - "List my Gaggimate profiles"
 - "Show my recent espresso shots"
 - "Diagnose my Gaggimate connection" (if having issues)
+
+## Gaggimate Studio Desktop
+
+The `desktop/` app combines Tauri 2, React 19, shadcn/ui, AI Elements, PydanticAI, AG-UI streaming, and the **A2UI v1.0 release-candidate protocol**. It reuses the actual MCP tools, repository barista instructions, five skills, and knowledge files.
+
+### Run locally
+
+Prerequisites: `uv`, Bun, Rust, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) (Xcode Command Line Tools on macOS).
+
+```bash
+uv sync --locked
+cd desktop
+bun install --frozen-lockfile
+bun run desktop
+```
+
+The native shell starts a loopback-only Python backend with a random per-launch bearer token and shuts down its process group when the app exits. `uv` must be installed; set `GAGGIMATE_UV` to its absolute executable path if it is not on the shell/GUI search path. The first packaged launch may download the locked Python runtime/dependencies.
+
+To build a native application:
+
+```bash
+cd desktop
+bun run desktop:build
+# macOS app: desktop/src-tauri/target/release/bundle/macos/Gaggimate Studio.app
+```
+
+Local builds are not code-signed/notarized for distribution. macOS was exercised; other platforms require their native toolchains and verification.
+
+### ChatGPT subscription, not API billing
+
+Open **Settings → Sign in with ChatGPT** and authorize the app in your browser. This uses PydanticAI's [`OpenAIChatGPTProvider`](https://pydantic.dev/docs/ai/models/openai-chatgpt/) and OpenAI's [Sign in with ChatGPT preview](https://developers.openai.com/siwc/token-sharing-open-source). It does not copy OMP/Codex credentials or require an OpenAI API key. There is no automatic API-billing fallback.
+
+`gpt-6.1-sol` is the default model. Model availability and usage limits depend on the account/workspace; change the model in Settings if access is rejected. The OAuth callback uses `127.0.0.1:1455`; close another app's pending sign-in if that port is occupied. Credentials are app-owned, stored privately, and refreshed persistently; only one backend may own a data directory at a time.
+
+Read-only agent tools run immediately. Agent-requested mutations pause for an explicit **Approve / Deny** decision showing the exact tool arguments. Existing MCP deletion restrictions still apply. The app does not expose commands to start brewing, heating, or pumping.
+
+### Workspace
+
+- **Brew journal**: Import available machine history, then browse cached records without a device connection. Filter by source, machine, coffee, profile/recipe, dates, or text. Compare multiple shots on elapsed-time axes with independently labelled pressure, puck/pump flow, temperature, scale-weight, and firmware-resistance charts. Recorded targets, phase stops, warnings, and diagnostics remain tied to the original shot.
+- **Statistics**: Inspect filtered totals, daily trends and per-profile/per-phase averages. Missing values are excluded, with measurement counts shown; measured pumped water is distinct from beverage yield and coffee dose.
+- **Quick notes**: Record coffee, grinder, setting, dose, yield, rating and taste. **Save notes locally** does not touch the device. Enable **Also sync these notes** explicitly to write to the source machine; failures remain visible and can be retried. Matching bean/profile/machine history supplies optional starting settings, not predicted results. Applying a suggestion changes the form only.
+- **Manual brews**: Create equipment and named recipes under **Brewers & recipes**, then record espresso, pour-over, or another brew with a timezone-aware date and optional measurements. Recipe application is explicit. Manual entries have no invented telemetry.
+- **Coffee & grinders**: Maintain origin, roast date/level, process, variety, altitude, rating, and notes. Archive, restore, or merge duplicates while preserving historical names and snapshots. Native version-1 JSON exports contain catalog entries, not brew history. Imports require a preview; existing IDs remain unchanged and different IDs remain separate even when names match. Beanconqueror, ZIP and Excel formats are not supported.
+- **Machines**: Add named local devices and import one or all on demand. Equal shot numbers on different machines are isolated. Import runs in bounded batches with visible progress, skips cached records, and catches up without overwriting local notes; partial errors retain successfully imported data. Address editing means the same physical device moved—add a new machine for a different device.
+- **Profiles**: Browse/search the selected machine's profiles, inspect phase settings, export JSON, or install a validated Pro JSON as a new copy. Installation and active-profile selection require separate confirmations; neither starts a brew. There is no hosted community store or MyBrewFolio account connection.
+- **Barista studio**: Stream answers and tool activity beside agent-generated A2UI charts, diagrams, tables, and interactive forms. Conversations and generated surfaces persist locally.
+- **Tools & knowledge**: Every MCP tool is available directly with its actual input schema, including profiles, shot feedback, user setup, grind maps, brewing insights, and knowledge access.
+
+The barista and **Tools & knowledge** still target the default machine. The journal and profile browser support the other machines explicitly. History imports are manual, not a background scheduler. Clearing some numeric/taste fields is local-only because the existing device note API cannot express those clears; attempted sync reports this rather than claiming success.
+
+The official React A2UI renderer does not yet support v1.0, so this app implements a restricted, validated catalog identified by `urn:gaggimate:catalog:1.0` in `desktop/src/a2ui/catalog.json`. It is **not** a universal Basic Catalog renderer. It supports v1.0 creation/update/deletion, data bindings, form actions, and function responses; unsupported functions return errors. Agent-supplied JavaScript/HTML is never executed. Mermaid diagrams use strict mode, sanitization, and isolated SVG images.
+
+### Storage and development
+
+Development/debug builds share this checkout's `data/`, `coffees/`, and `user/` directories with the existing MCP server. Packaged release builds use the OS application-data directory (`~/Library/Application Support/com.gaggimate.studio` on macOS), with bundled read-only source/knowledge and a private Python environment. Existing checkout data is not automatically copied into packaged app storage.
+
+`workspace.sqlite3` stores machine identities, imported analyses, manual brews, brewers, and recipes. The existing `beans.sqlite3` stores the shared coffee/grinder catalog and default-machine bean snapshots. Legacy bean records and rating backups are imported without replacing their snapshots; unknown dates/telemetry stay unknown until device import. Additional machines use `machines/<machine-id>/` for MCP backups so shot IDs cannot collide. Back up the data directory for complete history; catalog JSON export is not a full workspace backup.
+
+Backend settings and OAuth credentials are under `<data-dir>/.desktop/`; never upload that directory. Chat transcripts/surfaces are in the webview's local storage. Model requests send conversational context and requested tool results to OpenAI; device operations stay on the local network.
+
+For browser-only UI development, start the Python backend with a random `GAGGIMATE_DESKTOP_TOKEN` (at least 32 characters), then supply the same token as `VITE_BACKEND_TOKEN` and its loopback URL as `VITE_BACKEND_URL` to `bun run dev`. Keep those variables local; production/native builds obtain their token through Tauri IPC instead.
+
+```bash
+PYTHONPATH=src uv run pytest tests/test_workspace.py tests/test_library.py tests/test_profile_import.py tests/test_beans.py tests/test_api_websocket.py tests/test_desktop.py tests/test_transformers_shot.py
+cd desktop
+bun test src/a2ui src/lib/profiles.test.ts
+bun run build
+```
 
 ## Claude Desktop Project Setup (Optional)
 

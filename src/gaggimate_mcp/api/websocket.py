@@ -10,6 +10,8 @@ import asyncio
 import json
 import time
 import random
+import hashlib
+from pathlib import Path
 from typing import Optional, Any
 from websockets import connect
 from websockets.exceptions import WebSocketException
@@ -17,6 +19,9 @@ from websockets.exceptions import WebSocketException
 from gaggimate_mcp.config import GaggimateConfig
 from gaggimate_mcp.errors import GaggimateError, ErrorCode
 from gaggimate_mcp.logging_config import get_logger
+from gaggimate_mcp.models.rating import ShotRating
+from gaggimate_mcp.storage.beans import normalize_shot_id
+from gaggimate_mcp.storage.locking import async_file_lock
 
 logger = get_logger(__name__)
 
@@ -352,7 +357,7 @@ class GaggimateWebSocketClient:
             GaggimateError: If request fails
         """
         # Normalize shot ID - API expects integer string without leading zeros
-        normalized_id = str(int(shot_id))
+        normalized_id = normalize_shot_id(shot_id)
         request_id = generate_request_id()
         logger.info("getting_shot_notes", shot_id=normalized_id, url=self.ws_url)
 
@@ -361,6 +366,10 @@ class GaggimateWebSocketClient:
             request_id,
             id=normalized_id
         )
+        if "notes" not in response or (
+            response["notes"] is not None and not isinstance(response["notes"], dict)
+        ):
+            raise GaggimateError(ErrorCode.API_ERROR, "Device returned invalid shot notes; refusing to overwrite")
         notes = response.get("notes")
 
         if notes:
@@ -379,50 +388,47 @@ class GaggimateWebSocketClient:
         grind_setting: Optional[str] = None,
         dose_in: Optional[float] = None,
         dose_out: Optional[float] = None,
+        bean_type: Optional[str] = None,
     ) -> dict:
-        """Save notes for a specific shot to the device.
+        """Merge partial metadata and verify the complete saved object by read-back.
 
-        Args:
-            shot_id: Shot identifier (will be normalized to integer string)
-            rating: Star rating (0-5)
-            notes: Tasting notes text
-            balance_taste: Taste balance ("bitter", "balanced", "sour")
-            grind_setting: Grinder setting used
-            dose_in: Coffee dose in grams
-            dose_out: Espresso output in grams
-
-        Returns:
-            Response from the API
-
-        Raises:
-            GaggimateError: If request fails
+        The per-device/shot lock serializes read-modify-write across local MCP
+        processes sharing storage. External device UI edits cannot be locked.
+        Firmware support for beanType is checked at runtime, never assumed from
+        a successful save acknowledgement.
         """
-        # Normalize shot ID - API expects integer string without leading zeros
-        normalized_id = str(int(shot_id))
-        request_id = generate_request_id()
-        logger.info("saving_shot_notes", shot_id=normalized_id, url=self.ws_url)
-
-        # Build notes object with only provided fields
-        notes_data: dict[str, Any] = {}
-        if rating is not None:
-            notes_data["rating"] = rating
-        if notes is not None:
-            notes_data["notes"] = notes
-        if balance_taste is not None:
-            notes_data["balanceTaste"] = balance_taste
-        if grind_setting is not None:
-            notes_data["grindSetting"] = grind_setting
-        if dose_in is not None:
-            notes_data["doseIn"] = dose_in
-        if dose_out is not None:
-            notes_data["doseOut"] = dose_out
-
-        response = await self._send_request(
-            "req:history:notes:save",
-            request_id,
-            id=normalized_id,
-            notes=notes_data
+        normalized_id = normalize_shot_id(shot_id)
+        validated = ShotRating(
+            shot_id=normalized_id, rating=rating, notes=notes,
+            balance_taste=balance_taste, grind_setting=grind_setting,
+            dose_in=dose_in, dose_out=dose_out, bean_type=bean_type,
         )
-
-        logger.info("shot_notes_saved", shot_id=normalized_id, msg=response.get("msg"))
-        return response
+        aliases = {"balance_taste": "balanceTaste", "grind_setting": "grindSetting",
+                   "dose_in": "doseIn", "dose_out": "doseOut", "bean_type": "beanType"}
+        updates = {
+            aliases.get(key, key): value
+            for key, value in validated.model_dump(mode="json", exclude_none=True).items()
+            if key not in {"shot_id", "ratio"}
+        }
+        device_key = hashlib.sha256(self.ws_url.encode()).hexdigest()[:24]
+        lock_path = Path(self.config.storage_path) / "locks" / f"notes-{device_key}-{normalized_id}.lock"
+        async with async_file_lock(lock_path):
+            existing = await self.get_shot_notes(normalized_id)
+            notes_data = dict(existing or {})
+            notes_data.update(updates)
+            response = await self._send_request(
+                "req:history:notes:save", generate_request_id(),
+                id=normalized_id, notes=notes_data,
+            )
+            saved = await self.get_shot_notes(normalized_id)
+            missing = [key for key, value in notes_data.items()
+                       if saved is None or key not in saved or saved[key] != value]
+            if missing:
+                raise GaggimateError(
+                    ErrorCode.API_ERROR,
+                    "Device read-back did not retain metadata fields: "
+                    + ", ".join(missing)
+                    + ". Firmware may not support these fields; local data remains available.",
+                )
+            logger.info("shot_notes_saved", shot_id=normalized_id)
+            return {**response, "notes": saved}

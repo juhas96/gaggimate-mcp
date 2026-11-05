@@ -1067,6 +1067,36 @@ class TestTimeSeries:
             duration=n * 100, weight=20.0, samples=samples, phases=[],
         )
 
+    def test_recorded_targets_preserve_zero_missing_values_and_phase_boundaries(self):
+        shot = self._long_shot(10)
+        for i, sample in enumerate(shot.samples):
+            sample["tp"] = 0.0 if i < 5 else 9.0
+            if i >= 5:
+                sample["tf"] = 2.0
+            else:
+                del sample["ct"]
+        shot.phases = [
+            PhaseTransition(sample_index=0, phase_number=0, phase_name="Bloom"),
+            PhaseTransition(sample_index=5, phase_number=1, phase_name="Extraction"),
+        ]
+        transformed = transform_shot_for_ai(shot, detail="time_series", resolution_hz=2)
+        first, second = transformed["time_series"]["points"]
+        assert first["target_pressure_bar"] == 0.0
+        assert first["temperature_c"] is None
+        assert second["temperature_c"] == 93.0
+        assert "target_flow_ml_s" not in first
+        assert second["target_pressure_bar"] == 9.0
+        assert second["target_flow_ml_s"] == 2.0
+        assert "target_temperature_c" not in second
+        bloom, extraction = transformed["phases"]
+        assert bloom["recorded_targets"] == {
+            "pressure_bar": {"start": 0.0, "end": 0.0, "avg": 0.0},
+        }
+        assert extraction["recorded_targets"]["pressure_bar"] == {
+            "start": 9.0, "end": 9.0, "avg": 9.0,
+        }
+        assert extraction["recorded_targets"]["flow_ml_s"]["avg"] == 2.0
+
     def test_never_exceeds_150_points(self):
         ts = _build_time_series(self._long_shot(), 4)
         assert len(ts['points']) <= 150

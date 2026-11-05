@@ -1,0 +1,472 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:gaggimate:catalog:1.0",
+  "protocolVersion": "1.0",
+  "title": "Gaggimate desktop catalog",
+  "description": "Custom A2UI v1.0 candidate renderer, not the Basic Catalog or a universal renderer.",
+  "catalogId": "urn:gaggimate:catalog:1.0",
+  "instructions": "Every envelope has version v1.0. Create surfaces before updates; use catalogId urn:gaggimate:catalog:1.0 and a component id root. Fields bind with {\"@path\":\"/field\"}. Actions use {\"event\":{\"name\":\"...\",\"context\":{...}}} or {\"functionCall\":{\"@call\":\"...\",\"args\":{...}}}. Unknown functions route to the agent; agent must answer agentFunctionResponse with matching functionCallId and value or error. Only listed component properties are supported (plus id,catalogId,accessibility). Text is plain text, not HTML. Diagram accepts strict Mermaid without directives, links, click handlers, HTML, or external resources. LineChart points are real numeric observations [{\"x\":0,\"pressure\":8.5}], series [{\"key\":\"pressure\",\"label\":\"Pressure (bar)\"}]; missing observations stay gaps, never fabricate values. Table rows are objects indexed by column key. Dynamic values support @path and local @call functions; remote calls in dynamic bindings resolve asynchronously. Data updates replace a path, null deletes it; omitted path or / replaces root. No code, URLs, arbitrary styles, inline catalogs or Basic Catalog compliance. Limits: 32 surfaces, 512 components/surface, 64 tree levels, 1000 displayed template items/table rows, 10000 chart points, 20000 Mermaid characters.",
+  "components": {
+    "Column": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Column"
+        },
+        "children": {
+          "$ref": "common_types.json#/$defs/ChildList"
+        }
+      },
+      "required": [
+        "component",
+        "children"
+      ]
+    },
+    "Row": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Row"
+        },
+        "children": {
+          "$ref": "common_types.json#/$defs/ChildList"
+        }
+      },
+      "required": [
+        "component",
+        "children"
+      ]
+    },
+    "Card": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Card"
+        },
+        "child": {
+          "$ref": "common_types.json#/$defs/ComponentId"
+        },
+        "title": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        }
+      },
+      "required": [
+        "component",
+        "child"
+      ]
+    },
+    "Text": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Text"
+        },
+        "text": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "variant": {
+          "enum": [
+            "body",
+            "heading",
+            "muted",
+            "code"
+          ]
+        }
+      },
+      "required": [
+        "component",
+        "text"
+      ]
+    },
+    "Button": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Button"
+        },
+        "label": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "action": {
+          "$ref": "common_types.json#/$defs/Action"
+        },
+        "disabled": {
+          "$ref": "common_types.json#/$defs/DynamicBoolean"
+        }
+      },
+      "required": [
+        "component",
+        "label",
+        "action"
+      ]
+    },
+    "TextField": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "TextField"
+        },
+        "label": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "value": {
+          "$ref": "common_types.json#/$defs/DataBinding"
+        },
+        "disabled": {
+          "$ref": "common_types.json#/$defs/DynamicBoolean"
+        },
+        "placeholder": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        }
+      },
+      "required": [
+        "component",
+        "label",
+        "value"
+      ]
+    },
+    "NumberField": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "NumberField"
+        },
+        "label": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "value": {
+          "$ref": "common_types.json#/$defs/DataBinding"
+        },
+        "disabled": {
+          "$ref": "common_types.json#/$defs/DynamicBoolean"
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "step": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "component",
+        "label",
+        "value"
+      ]
+    },
+    "Select": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Select"
+        },
+        "label": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "value": {
+          "$ref": "common_types.json#/$defs/DataBinding"
+        },
+        "disabled": {
+          "$ref": "common_types.json#/$defs/DynamicBoolean"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "component",
+        "label",
+        "value",
+        "options"
+      ]
+    },
+    "Table": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Table"
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "rows": {
+          "$ref": "common_types.json#/$defs/DynamicValue"
+        },
+        "caption": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        }
+      },
+      "required": [
+        "component",
+        "columns",
+        "rows"
+      ]
+    },
+    "Metric": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Metric"
+        },
+        "label": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "value": {
+          "$ref": "common_types.json#/$defs/DynamicValue"
+        },
+        "unit": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        }
+      },
+      "required": [
+        "component",
+        "label",
+        "value"
+      ]
+    },
+    "LineChart": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "LineChart"
+        },
+        "points": {
+          "$ref": "common_types.json#/$defs/DynamicValue"
+        },
+        "series": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "xLabel": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "yLabel": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "title": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        }
+      },
+      "required": [
+        "component",
+        "points",
+        "series"
+      ]
+    },
+    "Diagram": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "const": "Diagram"
+        },
+        "source": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        },
+        "title": {
+          "$ref": "common_types.json#/$defs/DynamicString"
+        }
+      },
+      "required": [
+        "component",
+        "source"
+      ]
+    }
+  },
+  "functions": {
+    "formatNumber": {
+      "type": "object",
+      "returnType": "string",
+      "allowedCallers": "rendererOrAgent",
+      "properties": {
+        "@call": {
+          "const": "formatNumber"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "$ref": "common_types.json#/$defs/DynamicNumber"
+            },
+            "digits": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "@call",
+        "args"
+      ]
+    },
+    "required": {
+      "type": "object",
+      "returnType": "validationResult",
+      "allowedCallers": "rendererOrAgent",
+      "properties": {
+        "@call": {
+          "const": "required"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "$ref": "common_types.json#/$defs/DynamicValue"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "@call",
+        "args"
+      ]
+    },
+    "length": {
+      "type": "object",
+      "returnType": "number",
+      "allowedCallers": "rendererOrAgent",
+      "properties": {
+        "@call": {
+          "const": "length"
+        },
+        "args": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "$ref": "common_types.json#/$defs/DynamicValue"
+            }
+          },
+          "required": [
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "@call",
+        "args"
+      ]
+    }
+  },
+  "$defs": {
+    "anyComponent": {
+      "oneOf": [
+        {
+          "$ref": "#/components/Column"
+        },
+        {
+          "$ref": "#/components/Row"
+        },
+        {
+          "$ref": "#/components/Card"
+        },
+        {
+          "$ref": "#/components/Text"
+        },
+        {
+          "$ref": "#/components/Button"
+        },
+        {
+          "$ref": "#/components/TextField"
+        },
+        {
+          "$ref": "#/components/NumberField"
+        },
+        {
+          "$ref": "#/components/Select"
+        },
+        {
+          "$ref": "#/components/Table"
+        },
+        {
+          "$ref": "#/components/Metric"
+        },
+        {
+          "$ref": "#/components/LineChart"
+        },
+        {
+          "$ref": "#/components/Diagram"
+        }
+      ],
+      "discriminator": {
+        "propertyName": "component"
+      }
+    },
+    "anyFunction": {
+      "oneOf": [
+        {
+          "$ref": "#/functions/formatNumber"
+        },
+        {
+          "$ref": "#/functions/required"
+        },
+        {
+          "$ref": "#/functions/length"
+        }
+      ],
+      "discriminator": {
+        "propertyName": "@call"
+      }
+    }
+  }
+}

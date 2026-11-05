@@ -95,6 +95,13 @@ class PhaseDiagnostics(TypedDict, total=False):
     annotations: dict[str, str]
 
 
+class RecordedTarget(TypedDict):
+    """Commanded values present in a phase's original telemetry."""
+    start: float
+    end: float
+    avg: float
+
+
 class PhaseData(TypedDict):
     """Phase data for AI analysis."""
     name: str
@@ -102,14 +109,13 @@ class PhaseData(TypedDict):
     start_time_seconds: float
     duration_seconds: float
     sample_count: int
-    avg_temperature_c: float
-    avg_pressure_bar: float
-    total_flow_ml: float
+    avg_temperature_c: Optional[float]
+    avg_pressure_bar: Optional[float]
+    total_flow_ml: Optional[float]
     samples: NotRequired[list[TransformedSample]]
     diagnostics: NotRequired[PhaseDiagnostics]
-    # Why the *previous* phase ended (v7+ only; omitted on legacy files
-    # where it's always "Unknown"). Distinguishes a phase that hit its
-    # volumetric target from one that merely timed out.
+    recorded_targets: NotRequired[dict[str, RecordedTarget]]
+    # Why this phase ended (v7+ only; omitted on legacy files where unknown).
     exit_reason: NotRequired[str]
 
 
@@ -311,13 +317,16 @@ class MachineReported(TypedDict):
 class TimeSeriesPoint(TypedDict):
     """One binned-mean point of a time_series detail-level output."""
     time_seconds: float
-    temperature_c: float
-    pressure_bar: float
-    flow_ml_s: float
-    weight_g: float
+    temperature_c: Optional[float]
+    pressure_bar: Optional[float]
+    flow_ml_s: Optional[float]
+    weight_g: Optional[float]
     phase_number: int
     machine_puck_resistance: NotRequired[float]
     machine_pump_flow_ml_s: NotRequired[float]
+    target_temperature_c: NotRequired[float]
+    target_pressure_bar: NotRequired[float]
+    target_flow_ml_s: NotRequired[float]
 
 
 class TimeSeries(TypedDict):
@@ -1846,16 +1855,16 @@ def _build_time_series(shot: ShotData, resolution_hz: int = 2) -> TimeSeries:
         center_idx = min((start_idx + end_idx) // 2, total_samples - 1)
         center = samples[center_idx]
 
-        def _mean_of(key: str) -> float:
+        def _mean_of(key: str) -> Optional[float]:
             vals = [s[key] for s in window if key in s]
-            return _safe_mean(vals) if vals else 0.0
+            return round(_safe_mean(vals) * 10) / 10 if vals else None
 
         point = TimeSeriesPoint(
             time_seconds=round(center.get('t', 0.0) / 1000.0 * 10) / 10,
-            temperature_c=round(_mean_of('ct') * 10) / 10,
-            pressure_bar=round(_mean_of('cp') * 10) / 10,
-            flow_ml_s=round(_mean_of('pf') * 10) / 10,
-            weight_g=round(_mean_of('v') * 10) / 10,
+            temperature_c=_mean_of('ct'),
+            pressure_bar=_mean_of('cp'),
+            flow_ml_s=_mean_of('pf'),
+            weight_g=_mean_of('v'),
             phase_number=center.get('phase', 0),
         )
         pr_values = [s['pr'] for s in window if 'pr' in s]
@@ -1864,6 +1873,13 @@ def _build_time_series(shot: ShotData, resolution_hz: int = 2) -> TimeSeries:
         fl_values = [s['fl'] for s in window if 'fl' in s]
         if fl_values:
             point['machine_pump_flow_ml_s'] = _round2(_safe_mean(fl_values))
+        for raw_key, output_key in (
+            ("tt", "target_temperature_c"), ("tp", "target_pressure_bar"),
+            ("tf", "target_flow_ml_s"),
+        ):
+            values = [s[raw_key] for s in window if raw_key in s]
+            if values:
+                point[output_key] = _round2(_safe_mean(values))
 
         points.append(point)
 
@@ -1965,6 +1981,20 @@ def transform_shot_for_ai(
     return result
 
 
+def _recorded_targets(samples: list[dict]) -> dict[str, RecordedTarget]:
+    targets: dict[str, RecordedTarget] = {}
+    for raw_key, output_key in (
+        ("tt", "temperature_c"), ("tp", "pressure_bar"), ("tf", "flow_ml_s"),
+    ):
+        values = [sample[raw_key] for sample in samples if raw_key in sample]
+        if values:
+            targets[output_key] = {
+                "start": _round2(values[0]), "end": _round2(values[-1]),
+                "avg": _round2(_safe_mean(values)),
+            }
+    return targets
+
+
 def _build_phases(
     shot: ShotData,
     *,
@@ -1996,9 +2026,9 @@ def _build_phases(
 
             temperatures = [s['ct'] for s in phase_samples if 'ct' in s]
             pressures = [s['cp'] for s in phase_samples if 'cp' in s]
-            avg_temp = round(sum(temperatures) / len(temperatures) * 10) / 10 if temperatures else 0.0
-            avg_pressure = round(sum(pressures) / len(pressures) * 10) / 10 if pressures else 0.0
-            total_flow = calculate_total_volume(phase_samples, shot.sample_interval)
+            avg_temp = round(sum(temperatures) / len(temperatures) * 10) / 10 if temperatures else None
+            avg_pressure = round(sum(pressures) / len(pressures) * 10) / 10 if pressures else None
+            total_flow = calculate_total_volume(phase_samples, shot.sample_interval) if any('pf' in s for s in phase_samples) else None
 
             start_time = phase_samples[0].get('t', 0.0) / 1000.0
             end_time = phase_samples[-1].get('t', 0.0) / 1000.0
@@ -2014,6 +2044,9 @@ def _build_phases(
                 "avg_pressure_bar": avg_pressure,
                 "total_flow_ml": total_flow,
             }
+            targets = _recorded_targets(phase_samples)
+            if targets:
+                pd["recorded_targets"] = targets
 
             # PhaseTransition.transition_reason records why the PREVIOUS
             # phase ended (v7+; see shot_log_format.h), so phase i's own
@@ -2046,11 +2079,11 @@ def _build_phases(
             phases.append(pd)
     else:
         # No phases defined — single 'extraction' phase
-        temperatures = [s.get('ct', 0.0) for s in samples]
-        pressures = [s.get('cp', 0.0) for s in samples]
-        avg_temp = round(sum(temperatures) / len(temperatures) * 10) / 10 if temperatures else 0.0
-        avg_pressure = round(sum(pressures) / len(pressures) * 10) / 10 if pressures else 0.0
-        total_flow = calculate_total_volume(samples, shot.sample_interval)
+        temperatures = [s['ct'] for s in samples if 'ct' in s]
+        pressures = [s['cp'] for s in samples if 'cp' in s]
+        avg_temp = round(sum(temperatures) / len(temperatures) * 10) / 10 if temperatures else None
+        avg_pressure = round(sum(pressures) / len(pressures) * 10) / 10 if pressures else None
+        total_flow = calculate_total_volume(samples, shot.sample_interval) if any('pf' in s for s in samples) else None
 
         pd = {
             "name": "extraction",
@@ -2062,6 +2095,9 @@ def _build_phases(
             "avg_pressure_bar": avg_pressure,
             "total_flow_ml": total_flow,
         }
+        targets = _recorded_targets(samples)
+        if targets:
+            pd["recorded_targets"] = targets
 
         if include_samples:
             pd["samples"] = _select_samples(samples)

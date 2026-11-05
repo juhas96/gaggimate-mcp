@@ -32,9 +32,9 @@ class TestWebSocketClientShotNotes:
     """Tests for shot notes WebSocket methods."""
 
     @pytest.fixture
-    def config(self):
-        """Create test configuration."""
-        return GaggimateConfig(gaggimate_host="test.local")
+    def config(self, tmp_path):
+        """Create isolated test configuration."""
+        return GaggimateConfig(gaggimate_host="test.local", storage_path=tmp_path)
 
     @pytest.fixture
     def client(self, config):
@@ -100,96 +100,70 @@ class TestWebSocketClientShotNotes:
         with pytest.raises(ValueError):
             await client.get_shot_notes("abc123")
 
-    @pytest.mark.asyncio
-    async def test_save_shot_notes_success(self, client):
-        """Test successful saving of shot notes."""
-        with patch.object(client, '_send_request', new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = {"msg": "Notes saved successfully"}
+    @pytest.fixture
+    def note_transport(self):
+        """Replacement-style firmware: omitted fields really would be erased."""
+        state = {}
 
+        async def request(kind, request_id, **kwargs):
+            if kind == "req:history:notes:get":
+                return {"notes": dict(state)}
+            assert kind == "req:history:notes:save"
+            state.clear()
+            state.update(kwargs["notes"])
+            return {"msg": "Notes saved successfully"}
+
+        return AsyncMock(side_effect=request)
+
+    @pytest.mark.asyncio
+    async def test_save_shot_notes_success(self, client, note_transport):
+        with patch.object(client, "_send_request", note_transport):
             result = await client.save_shot_notes(
-                shot_id="100",
-                rating=4,
-                notes="Excellent extraction",
-                balance_taste="balanced",
-                grind_setting="12",
-                dose_in=18.0,
-                dose_out=36.0
+                shot_id="100", rating=4, notes="Excellent extraction",
+                balance_taste="balanced", grind_setting="12", dose_in=18.0,
+                dose_out=36.0, bean_type="Ethiopia",
             )
-
-            assert result["msg"] == "Notes saved successfully"
-            mock_send.assert_called_once()
-            call_args = mock_send.call_args
-            assert call_args[0][0] == "req:history:notes:save"
-            assert call_args[1]["id"] == "100"
-            notes_data = call_args[1]["notes"]
-            assert notes_data["rating"] == 4
-            assert notes_data["notes"] == "Excellent extraction"
-            assert notes_data["balanceTaste"] == "balanced"
-            assert notes_data["grindSetting"] == "12"
-            assert notes_data["doseIn"] == 18.0
-            assert notes_data["doseOut"] == 36.0
+        assert result["msg"] == "Notes saved successfully"
+        assert note_transport.call_count == 3
+        call_args = note_transport.call_args_list[1]
+        assert call_args[0][0] == "req:history:notes:save"
+        assert call_args[1]["id"] == "100"
+        assert call_args[1]["notes"] == {
+            "rating": 4, "notes": "Excellent extraction", "balanceTaste": "balanced",
+            "grindSetting": "12", "doseIn": 18.0, "doseOut": 36.0, "beanType": "Ethiopia",
+        }
+        assert result["notes"] == call_args[1]["notes"]
 
     @pytest.mark.asyncio
-    async def test_save_shot_notes_partial_fields(self, client):
-        """Test saving notes with only some fields provided."""
-        with patch.object(client, '_send_request', new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = {"msg": "Notes saved"}
-
-            # Only provide rating and notes
-            await client.save_shot_notes(
-                shot_id="100",
-                rating=3,
-                notes="Slightly sour"
-            )
-
-            notes_data = mock_send.call_args[1]["notes"]
-            assert notes_data == {
-                "rating": 3,
-                "notes": "Slightly sour"
-            }
-            # Other fields should not be present
-            assert "balanceTaste" not in notes_data
-            assert "grindSetting" not in notes_data
-            assert "doseIn" not in notes_data
-            assert "doseOut" not in notes_data
+    async def test_save_shot_notes_partial_fields(self, client, note_transport):
+        with patch.object(client, "_send_request", note_transport):
+            await client.save_shot_notes(shot_id="100", rating=3, notes="Slightly sour")
+        assert note_transport.call_args_list[1][1]["notes"] == {
+            "rating": 3, "notes": "Slightly sour",
+        }
 
     @pytest.mark.asyncio
-    async def test_save_shot_notes_rating_only(self, client):
-        """Test saving only a rating without notes."""
-        with patch.object(client, '_send_request', new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = {"msg": "Notes saved"}
-
+    async def test_save_shot_notes_rating_only(self, client, note_transport):
+        with patch.object(client, "_send_request", note_transport):
             await client.save_shot_notes(shot_id="100", rating=5)
-
-            notes_data = mock_send.call_args[1]["notes"]
-            assert notes_data == {"rating": 5}
+        assert note_transport.call_args_list[1][1]["notes"] == {"rating": 5}
 
     @pytest.mark.asyncio
-    async def test_save_shot_notes_normalizes_id(self, client):
-        """Test that shot ID is normalized when saving."""
-        with patch.object(client, '_send_request', new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = {"msg": "Notes saved"}
-
+    async def test_save_shot_notes_normalizes_id(self, client, note_transport):
+        with patch.object(client, "_send_request", note_transport):
             await client.save_shot_notes(shot_id="000100", rating=4)
-
-            assert mock_send.call_args[1]["id"] == "100"
+        assert all(call.kwargs["id"] == "100" for call in note_transport.call_args_list)
 
     @pytest.mark.asyncio
     async def test_save_shot_notes_invalid_id(self, client):
-        """Test that invalid shot ID raises ValueError."""
         with pytest.raises(ValueError):
             await client.save_shot_notes(shot_id="invalid", rating=4)
 
     @pytest.mark.asyncio
-    async def test_save_shot_notes_zero_rating(self, client):
-        """Test saving a zero rating (valid but edge case)."""
-        with patch.object(client, '_send_request', new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = {"msg": "Notes saved"}
-
+    async def test_save_shot_notes_zero_rating(self, client, note_transport):
+        with patch.object(client, "_send_request", note_transport):
             await client.save_shot_notes(shot_id="100", rating=0)
-
-            notes_data = mock_send.call_args[1]["notes"]
-            assert notes_data["rating"] == 0
+        assert note_transport.call_args_list[1][1]["notes"]["rating"] == 0
 
     @pytest.mark.asyncio
     async def test_get_shot_notes_websocket_error(self, client):

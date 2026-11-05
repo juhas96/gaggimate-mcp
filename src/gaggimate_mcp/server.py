@@ -17,6 +17,8 @@ from gaggimate_mcp.api.http import GaggimateHTTPClient
 from gaggimate_mcp.transformers.shot import transform_shot_for_ai, VALID_DETAIL_LEVELS
 from gaggimate_mcp.storage.profiles import ProfileStorage
 from gaggimate_mcp.storage.ratings import RatingStorage
+from gaggimate_mcp.storage.beans import BeanStorage, normalize_shot_id
+from gaggimate_mcp.beans import BeanRecorder
 from gaggimate_mcp.storage.markdown import (
     MarkdownStorage,
     build_coffee_markdown,
@@ -26,7 +28,8 @@ from gaggimate_mcp.storage.markdown import (
     build_brewing_insights_markdown,
     _sanitize_filename,
 )
-from gaggimate_mcp.models.rating import ShotRating, BalanceTaste
+from gaggimate_mcp.models.rating import ShotRating
+from gaggimate_mcp.models.profile_import import imported_profile
 from gaggimate_mcp.errors import GaggimateError
 from gaggimate_mcp.diagnostics import diagnose_connection as run_diagnostics
 from gaggimate_mcp.resources import register_resources, _list_markdown_files, _read_markdown_file
@@ -48,6 +51,7 @@ ws_client = GaggimateWebSocketClient(config)
 http_client = GaggimateHTTPClient(config)
 profile_storage = ProfileStorage(config)
 rating_storage = RatingStorage(config)
+bean_storage = BeanStorage(config.storage_path)
 coffee_storage = MarkdownStorage(config.coffees_dir)
 user_storage = MarkdownStorage(config.user_dir)
 
@@ -115,7 +119,8 @@ async def manage_profile(
     profile_name: Optional[str] = None,
     temperature: Optional[float] = None,
     phases: Optional[Union[str, list]] = None,
-    confirm_delete: bool = False
+    confirm_delete: bool = False,
+    profile_data: Optional[dict] = None,
 ) -> str:
     """Manage espresso brewing profiles on the Gaggimate espresso machine.
 
@@ -124,6 +129,8 @@ async def manage_profile(
             - 'list': List all available profiles
             - 'get': Get a specific profile by ID
             - 'create': Create a new profile (requires profile_name, temperature, phases)
+            - 'import': Validate a full raw Pro profile JSON and create a new, unselected
+              AI-suffixed copy, preserving firmware metadata and phase extensions.
             - 'update': Update an existing profile. Supports PARTIAL UPDATES - only provide
               the fields you want to change. Requires profile_id or profile_name to identify
               the profile. Omitted fields will keep their existing values.
@@ -135,6 +142,8 @@ async def manage_profile(
         confirm_delete: Must be True to confirm profile deletion. This is a safety
             measure to prevent accidental deletions. Only profiles with the ' [AI]'
             suffix can be deleted by the agent.
+        profile_data: Complete raw GaggiMate Pro profile JSON object for 'import'.
+            Source id/selection are ignored; importing never overwrites or selects.
         profile_name: Profile name. IMPORTANT: For agent-created profiles, always add ' [AI]'
             suffix (e.g., 'Ethiopian Light [AI]') so users can identify AI-created profiles.
             Design note: We use a suffix (not prefix) because profile names are displayed
@@ -207,6 +216,21 @@ async def manage_profile(
                 "action": "get",
                 "profile": profile
             })
+
+        elif action == "import":
+            try:
+                profile = imported_profile(profile_data, config.ai_profile_suffix)
+            except (ValueError, TypeError, RecursionError) as exc:
+                return json.dumps({"success": False, "error": f"Invalid profile import: {exc}"})
+            saved_profile = await ws_client.save_profile(profile)
+            version_info = profile_storage.save_profile_version(
+                profile_name=profile["label"],
+                profile_data=saved_profile,
+                metadata={"action": action, "temperature": profile["temperature"],
+                          "phase_count": len(profile["phases"])},
+            )
+            return json.dumps({"success": True, "action": action, "profile": saved_profile,
+                               "version_info": version_info})
 
         elif action == "create":
             # Create requires all parameters
@@ -499,7 +523,7 @@ async def manage_profile(
         else:
             return json.dumps({
                 "success": False,
-                "error": f"Unknown action '{action}'. Use: list, get, create, update, delete, select"
+                "error": f"Unknown action '{action}'. Use: list, get, create, import, update, delete, select"
             })
 
     except GaggimateError as e:
@@ -601,158 +625,123 @@ async def manage_shot_notes(
     grind_setting: Optional[str] = None,
     dose_in: Optional[float] = None,
     dose_out: Optional[float] = None,
-    sync_to_device: bool = True
+    sync_to_device: bool = True,
+    bean_type: Optional[str] = None,
 ) -> str:
-    """Manage shot notes and ratings.
+    """Get device notes or update selected metadata, preserving unspecified fields.
 
-    This tool syncs feedback to the Gaggimate device (via WebSocket API) and saves
-    a local backup. The device is the source of truth for all shot notes.
-
-    Args:
-        shot_id: Shot ID (e.g., "100" or "000100" - will be normalized)
-        action: Action to perform - "update" or "get" (default: "update")
-        rating: Star rating (0-5, optional)
-        notes: Tasting notes (optional)
-        balance_taste: Taste balance - "bitter", "balanced", or "sour" (optional)
-        grind_setting: Grinder setting used (optional)
-        dose_in: Coffee dose in grams (optional)
-        dose_out: Espresso output in grams (optional)
-        sync_to_device: Whether to sync to Gaggimate device (default: True)
-
-    Returns:
-        JSON string with result
+    Supports rating (0–5), tasting notes, balance_taste (bitter/balanced/sour),
+    grind_setting, bean_type (coffee name), dose_in and dose_out. Updates validate
+    before any write, merge existing device metadata, and verify by read-back.
+    Local backups retain all metadata. Inspect sync_status.device_synced: success
+    alone means the local backup was saved, not that the device accepted it.
+    Set sync_to_device=False for local-only feedback.
     """
-    # Normalize shot ID - remove leading zeros for API, keep padded for local storage
     try:
-        shot_id_int = int(shot_id)
-        api_id = str(shot_id_int)  # For WebSocket API: "100"
-        storage_id = str(shot_id_int).zfill(6)  # For local storage: "000100"
-    except ValueError:
-        return json.dumps({
-            "success": False,
-            "error": f"Invalid shot ID: '{shot_id}'. Must be a number."
-        })
-
-    logger.info("manage_shot_notes_called", shot_id=shot_id, api_id=api_id, storage_id=storage_id, action=action, rating=rating)
-
-    try:
+        api_id = normalize_shot_id(shot_id)
+        storage_id = api_id.zfill(6)
         if action == "get":
-            # Get from device via WebSocket (device is source of truth)
-            device_notes = await ws_client.get_shot_notes(api_id)
             return json.dumps({
-                "success": True,
-                "shot_id": api_id,
-                "notes": device_notes,
-                "source": "device"
+                "success": True, "shot_id": api_id,
+                "notes": await ws_client.get_shot_notes(api_id), "source": "device",
             })
-
-        elif action == "update":
-            results = {
-                "device_synced": False,
-                "local_saved": False,
-                "device_error": None
-            }
-
-            # Design note: We use a prefix for shot notes to clearly indicate
-            # AI-generated content in the Gaggimate UI. This is intentionally
-            # different from the suffix used for profile names because:
-            # 1. Notes are free-form text where a prefix is more natural
-            # 2. Profile names are displayed in lists where suffix keeps the
-            #    meaningful name visible on small screens
-            # Both prefixes are configurable via GAGGIMATE_AI_NOTES_PREFIX and
-            # GAGGIMATE_AI_PROFILE_SUFFIX environment variables.
-            agent_notes = None
-            if notes:
-                agent_prefix = config.ai_notes_prefix
-                # Only add prefix if not already present
-                if not notes.startswith(agent_prefix):
-                    agent_notes = f"{agent_prefix}{notes}"
-                else:
-                    agent_notes = notes
-            
-            # Save to device if requested
-            if sync_to_device:
-                try:
-                    await ws_client.save_shot_notes(
-                        shot_id=api_id,
-                        rating=rating,
-                        notes=agent_notes,
-                        balance_taste=balance_taste,
-                        grind_setting=grind_setting,
-                        dose_in=dose_in,
-                        dose_out=dose_out,
-                    )
-                    results["device_synced"] = True
-                    logger.info("shot_notes_synced_to_device", shot_id=api_id)
-                except GaggimateError as e:
-                    results["device_error"] = str(e)
-                    logger.warning("shot_notes_device_sync_failed", shot_id=api_id, error=str(e))
-
-            # Convert balance_taste string to enum if provided
-            balance_taste_enum = None
-            if balance_taste:
-                try:
-                    balance_taste_enum = BalanceTaste(balance_taste.lower())
-                except ValueError:
-                    logger.warning("invalid_balance_taste", value=balance_taste)
-                    # Continue with None
-
-            # Always save locally as backup
-            shot_rating = ShotRating(
-                shot_id=storage_id,
-                rating=rating,
-                notes=agent_notes,
-                balance_taste=balance_taste_enum,
-                grind_setting=grind_setting,
-                dose_in=dose_in,
-                dose_out=dose_out,
-            )
-            rating_data = rating_storage.save_rating(shot_rating)
-            results["local_saved"] = True
-
-            # Build response message
-            if results["device_synced"]:
-                message = "Shot notes saved to device and stored locally"
-            elif results["device_error"]:
-                message = f"Shot notes stored locally (device sync failed: {results['device_error']})"
-            else:
-                message = "Shot notes stored locally only"
-
-            return json.dumps({
-                "success": True,
-                "message": message,
-                "shot_id": storage_id,
-                "api_id": api_id,
-                "rating": rating_data,
-                "sync_status": results
-            })
-
+        if action != "update":
+            raise ValueError(f"Unknown action '{action}'. Use 'update' or 'get'")
+        agent_notes = notes
+        if notes and not notes.startswith(config.ai_notes_prefix):
+            agent_notes = f"{config.ai_notes_prefix}{notes}"
+        shot_rating = ShotRating(
+            shot_id=storage_id, rating=rating, notes=agent_notes,
+            balance_taste=balance_taste.lower() if balance_taste is not None else None,
+            grind_setting=grind_setting, bean_type=bean_type,
+            dose_in=dose_in, dose_out=dose_out,
+        )
+        results = {"device_synced": False, "local_saved": False, "device_error": None}
+        # Persist first so a failed connection or cancellation cannot lose feedback.
+        rating_data = rating_storage.save_rating(shot_rating)
+        results["local_saved"] = True
+        if sync_to_device:
+            try:
+                response = await ws_client.save_shot_notes(
+                    shot_id=api_id, rating=shot_rating.rating, notes=shot_rating.notes,
+                    balance_taste=shot_rating.balance_taste,
+                    grind_setting=shot_rating.grind_setting, bean_type=shot_rating.bean_type,
+                    dose_in=shot_rating.dose_in, dose_out=shot_rating.dose_out,
+                )
+                rating_data = rating_storage.save_rating(shot_rating, device_notes=response["notes"])
+                results["device_synced"] = True
+            except Exception as exc:
+                results["device_error"] = str(exc) or type(exc).__name__
+                logger.warning("shot_notes_device_sync_failed", shot_id=api_id, error=results["device_error"])
+        if results["device_synced"]:
+            message = "Shot notes verified on device and stored locally"
+        elif results["device_error"]:
+            message = f"Shot notes stored locally (device sync failed: {results['device_error']})"
         else:
-            return json.dumps({
-                "success": False,
-                "error": f"Unknown action '{action}'. Use 'update' or 'get'"
-            })
+            message = "Shot notes stored locally only"
+        return json.dumps({
+            "success": True, "message": message, "shot_id": storage_id,
+            "api_id": api_id, "rating": rating_data, "sync_status": results,
+        })
+    except (ValueError, ValidationError) as exc:
+        return json.dumps({"success": False, "error": f"Validation error: {exc}"})
+    except Exception as exc:
+        logger.error("manage_shot_notes_error", shot_id=shot_id, error=str(exc))
+        return json.dumps({"success": False, "error": str(exc) or type(exc).__name__})
 
-    except ValidationError as e:
-        # Pydantic validation error
-        logger.error("manage_shot_notes_validation_error", shot_id=shot_id, error=str(e))
-        return json.dumps({
-            "success": False,
-            "error": f"Validation error: {str(e)}"
-        })
-    except ValueError as e:
-        # Other value errors
-        logger.error("manage_shot_notes_value_error", shot_id=shot_id, error=str(e))
-        return json.dumps({
-            "success": False,
-            "error": f"Value error: {str(e)}"
-        })
-    except Exception as e:
-        logger.error("manage_shot_notes_unexpected_error", shot_id=shot_id, error=str(e))
-        return json.dumps({
-            "success": False,
-            "error": f"Unexpected error: {str(e)}"
-        })
+
+@mcp.tool()
+async def manage_beans(
+    action: str,
+    bean_id: Optional[str] = None,
+    name: Optional[str] = None,
+    roaster: Optional[str] = None,
+    origin: Optional[str] = None,
+    roast_date: Optional[str] = None,
+    notes: Optional[str] = None,
+    shot_id: Optional[str] = None,
+    grind_setting: Optional[str] = None,
+) -> str:
+    """Manage beans and record a shot's bean snapshot and grinder setting.
+
+    list: list bean catalog. save: create (name required) or update by bean_id;
+    omitted fields stay unchanged, empty optional fields clear them. roast_date
+    uses YYYY-MM-DD. delete: delete bean_id but preserve historical records.
+    record: requires bean_id, shot_id, grind_setting; saves locally then syncs
+    beanType/grindSetting to the device with read-back verification. Repeating
+    the same arguments preserves the original bean snapshot; explicit changed
+    arguments correct that shot's association. Catalog edits never rewrite shots.
+    records: list shot records, optionally filtered by shot_id.
+    sync: manually retry a stored shot_id, including after its bean was deleted.
+
+    record/sync returns {success:true,record:{...,sync_status,sync_error}}.
+    success means local persistence ONLY. sync_status is synced only after
+    device read-back; failed/pending records remain available for manual retry.
+    """
+    try:
+        if action == "list":
+            return json.dumps({"success": True, "beans": bean_storage.list_beans()})
+        if action == "save":
+            bean = bean_storage.save(bean_id, name=name, roaster=roaster, origin=origin,
+                                     roast_date=roast_date, notes=notes)
+            return json.dumps({"success": True, "bean": bean})
+        if action == "delete":
+            if not bean_storage.delete(bean_id):
+                raise ValueError("Bean not found")
+            return json.dumps({"success": True, "bean_id": bean_id})
+        if action == "records":
+            return json.dumps({"success": True, "records": bean_storage.records(shot_id)})
+        recorder = BeanRecorder(bean_storage, ws_client, rating_storage)
+        if action == "record":
+            record = await recorder.record(bean_id, shot_id, grind_setting)
+        elif action == "sync":
+            record = await recorder.sync(shot_id)
+        else:
+            raise ValueError("Unknown action. Use list, save, delete, record, records, or sync")
+        return json.dumps({"success": True, "record": record})
+    except Exception as exc:
+        logger.error("manage_beans_error", action=action, error=str(exc))
+        return json.dumps({"success": False, "error": str(exc) or type(exc).__name__})
 
 
 @mcp.tool()
@@ -797,11 +786,12 @@ async def diagnose_connection() -> str:
 
 
 @mcp.tool()
-async def list_recent_shots(limit: int = 10) -> str:
-    """List recent shots with optional filtering.
+async def list_recent_shots(limit: int = 10, offset: int = 0) -> str:
+    """List recent shots with stable offset pagination.
 
     Args:
         limit: Number of shots to return (default 10, max 50)
+        offset: Number of newest shots to skip (default 0)
 
     Returns:
         JSON string with list of recent shots
@@ -813,7 +803,9 @@ async def list_recent_shots(limit: int = 10) -> str:
         limit = max(1, min(limit, 50))
 
         # Fetch shot index
-        shots = await http_client.list_recent_shots(limit=limit)
+        if offset < 0:
+            raise ValueError("offset must be nonnegative")
+        shots = await http_client.fetch_shot_index(limit=limit, offset=offset)
 
         # Enrich with ratings
         for shot in shots:
@@ -827,7 +819,9 @@ async def list_recent_shots(limit: int = 10) -> str:
             "success": True,
             "shots": shots,
             "count": len(shots),
-            "limit": limit
+            "limit": limit,
+            "offset": offset,
+            "next_offset": offset + len(shots) if len(shots) == limit else None,
         })
 
     except GaggimateError as e:

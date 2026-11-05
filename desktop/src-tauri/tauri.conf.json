@@ -1,0 +1,52 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Gaggimate Studio",
+  "version": "0.1.0",
+  "identifier": "com.gaggimate.studio",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Gaggimate Studio",
+        "width": 1440,
+        "height": 940,
+        "minWidth": 900,
+        "minHeight": 650,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*; object-src 'none'; frame-src 'none'; base-uri 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": {
+      "../../src/": "runtime/src/",
+      "../../knowledge/": "runtime/knowledge/",
+      "../../agent-instructions/": "runtime/agent-instructions/",
+      "../../agent-skills/": "runtime/agent-skills/",
+      "../../pyproject.toml": "runtime/pyproject.toml",
+      "../../uv.lock": "runtime/uv.lock",
+      "../../README.md": "runtime/README.md",
+      "../src/a2ui/catalog.json": "runtime/desktop/src/a2ui/catalog.json"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "android": {
+      "debugApplicationIdSuffix": ".debug"
+    }
+  }
+}
